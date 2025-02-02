@@ -1,157 +1,174 @@
 from bs4 import BeautifulSoup
 from tqdm import tqdm
-from colorama import init, Fore
 import requests
 import csv
 
+# На 03.02.2025 есть проблема с сертами WH.
+# False отключает обязательную проверку, но делает соединение уязвимым для MITM-атак.
+verify_wh = False
+
+TYPE_MAPPING = {
+    "существительное": "n",
+    "глагол": "v",
+    "прилагательное": "adj",
+    "наречие": "adv"
+}
+
 def PrintError(message):
-    print(f"\n\t[{Fore.RED}!{Fore.WHITE}] {message}")
+    print(f"[!] {message}")
 
 def PrintWarning(message):
-    print(f"\n\t[{Fore.YELLOW}?{Fore.WHITE}] {message}")
+    print(f"[?] {message}")
 
-def main():
-    # Open Targets.txt
-    urls = []
+def ReadTargets(path: str) -> list[str]:
+    result = []
     try:
-        # Default: 'r'
-        file = open("Targets.txt")
-        
-        # Remove '\n' and spaces
-        lines = file.read().splitlines()
+        with open(path, "r", encoding="utf-8") as file:
+            for url in file.read().splitlines():
+                number = url.strip().split('/')[-1]
+                result.append(number)
+    except Exception as e:
+        PrintError(e)
+    return result
 
-        # Place all lines in array
-        for i in lines:
-            urls.append(i)
-
-        # Free memory
-        file.close()
-    except:
-        PrintError("Reading error: Targets.txt")
-        return
-
-    # Open Result.csv
+def GetToken() -> str | None:
+    headers = {
+        'accept': '*/*',
+        'accept-language': 'ru-RU',
+        'content-type': 'application/x-www-form-urlencoded; charset=UTF-8',
+        'origin': 'https://www.vocabulary.com',
+        'priority': 'u=1, i',
+        'referer': 'https://www.vocabulary.com/',
+        'sec-ch-ua': '"Not;A=Brand";v="24", "Chromium";v="128"',
+        'sec-ch-ua-mobile': '?0',
+        'sec-ch-ua-platform': '"Windows"',
+        'sec-fetch-dest': 'empty',
+        'sec-fetch-mode': 'cors',
+        'sec-fetch-site': 'same-site',
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
+    }
     try:
-        # Write, using UTF-8
-        file = open("Result.csv", "w", encoding = "utf8", newline = '')
+        response = requests.post('https://api.vocabulary.com/1.0/auth/token', headers=headers)
+        if not response.ok:
+            PrintWarning(f"Невалидный HTTP-код ({response.status_code}) с API авторизации vocabulary.com")
+            return None
+        return response.json()['access_token']
+    except Exception as e:
+        PrintError(e)
+    return None
 
-        # [Word] [Translation]
-        writter = csv.DictWriter(file, fieldnames = ["Word", "Translation"])
+def GetWordsList(token: str, id: str) -> list:
+    headers = {
+        'accept': 'application/json',
+        'accept-language': 'ru-RU',
+        'authorization': f'Bearer {token}',
+        'origin': 'https://www.vocabulary.com',
+        'priority': 'u=1, i',
+        'referer': 'https://www.vocabulary.com/',
+        'sec-ch-ua': '"Not;A=Brand";v="24", "Chromium";v="128"',
+        'sec-ch-ua-mobile': '?0',
+        'sec-ch-ua-platform': '"Windows"',
+        'sec-fetch-dest': 'empty',
+        'sec-fetch-mode': 'cors',
+        'sec-fetch-site': 'same-site',
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
+        'x-time-zone': 'Asia/Yekaterinburg',
+    }
+    try:
+        response = requests.get(
+            f'https://api.vocabulary.com/1.0/lists/{id}',
+            headers=headers
+        )
 
-        # Prepare headers
-        writter.writeheader()
-        
-        # URLs iteration
-        for url in urls:
-            # Prepare words (using SOUP)
-            words = GetWords(url)
-            if words != False:
-                # Using progressbar
-                print(f"# Url {Fore.YELLOW}[{url}]{Fore.WHITE} started, progress: ")
-                for i in tqdm(words):
-                    # Get word details (buffer[0] - info, buffer[1] - translation) or False
-                    buffer = FetchWord(i)
-                    
-                    # If finded via WooordHunt
-                    if buffer != False:
-                        # Write into .csv
-                        writter.writerow({ "Word": buffer[0], "Translation": buffer[1] })
-    except:
-        PrintError("Reading error: Result.csv")
+        if not response.ok:
+            PrintWarning(f"HTTP Error ({response.status_code}) for id [{id}]")
+            return None
 
-    PrintWarning("Well done!")
-    # Free memory
-    file.close()
-
-# Print a word type (ex: (n, v) or (n)
-def PrintWordType(wordType, currentLen, maxLen):
-    if currentLen < maxLen:
-        return wordType + ", "
-    else:
-        return wordType
+        result = []
+        for word in response.json()['wordlist']['words']:
+            result.append(word['word'])
+        return result
+    except Exception as e:
+        PrintError(e)
+    return None
 
 def FetchWord(word):
-    # Try to get HTML source
+    headers = {
+        'Accept-Language': 'ru-RU',
+        'Upgrade-Insecure-Requests': '1',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
+        'sec-ch-ua': '"Not;A=Brand";v="24", "Chromium";v="128"',
+        'sec-ch-ua-mobile': '?0',
+        'sec-ch-ua-platform': '"Windows"',
+    }
+
     try:
-        # Using WooordHunt
-        request = requests.get("http://wooordhunt.ru/word/" + word)
-    except:
-        PrintError("Requests module error!")
-        return False
+        response = requests.get(
+            f'https://wooordhunt.ru/word/{word}',
+            headers=headers,
+            verify=verify_wh
+        )
 
-    # Try to using SOUP
+        if not response.ok:
+            PrintWarning(f"HTTP Error ({response.status_code}) for word [{word}]")
+            return None
+
+        soup = BeautifulSoup(response.text, "html.parser")
+        british_source = soup.find("span", class_="transcription")
+        translation_source = soup.find("div", class_="t_inline_en")
+        forms_div = soup.find_all("h4", class_="pos_item")
+
+        if not british_source:
+            PrintWarning(f"Транскрипция не найдена для слова: ({word})")
+            return None
+
+        transcription = british_source.text[1:].strip()
+        word_types = []
+        for item in forms_div:
+            text = item.text.lower()
+            for rus_name, short_name in TYPE_MAPPING.items():
+                if rus_name in text:
+                    word_types.append(short_name)
+                    break
+
+        type_str = f"({', '.join(word_types)})" if word_types else ""
+        if not translation_source:
+            PrintWarning(f"Перевод не найден для слова: ({word})")
+            return None
+
+        translation = translation_source.get_text(strip=True)
+        return [
+            f"{word} {transcription} {type_str}",
+            translation
+        ]
+    except Exception as e:
+        PrintError(e)
+    return None
+
+def EntryPoint() -> None:
+    targetsPath = "Targets.txt"
+    resultPath = "Result.csv"
+
+    targets = ReadTargets(targetsPath)
+    if len(targets) == 0:
+        PrintError(f"В файле ({targetsPath}) нет корректных урлов!")
+        return
+
+    token = GetToken()
+    if token is None:
+        PrintError("Не удалось получить токен для (api.vocabulary.com)!")
+        return
+
     try:
-        soup = BeautifulSoup(request.text, "html.parser")
-    except:
-        PrintError("BeautifulSoup module error!")
-        return False
+        with open(resultPath, "w", encoding="utf8", newline='') as file:
+            writter = csv.DictWriter(file, fieldnames=["Word", "Translation"])
+            writter.writeheader()
+            for url in tqdm(targets):
+                for word in GetWordsList(token, url):
+                    if result := FetchWord(word):
+                        writter.writerow({"Word": result[0], "Translation": result[1]})
+    except Exception as e:
+        PrintError(e)
 
-    result = [ word, "" ]
-
-    # Find a british transcription
-    britishDiv = soup.find("div", { "id" : "uk_tr_sound" })
-    britishSource = soup.find("span", class_ = "transcription")
-    try:
-        result[0] += " " + britishSource.text[1:] + " ("
-    except:
-        PrintWarning(f"British transcription not found, word [{word}]")
-        return False
-
-    # Forms
-    formsDiv = soup.find_all("h4", class_ = "pos_item")
-    maxLen = len(formsDiv)
-    currentLen = 0
-
-    # Print a word type
-    for i in formsDiv:
-        currentLen += 1
-        buffer = i.text
-        if "существительное" in buffer:
-            result[0] += PrintWordType("n", currentLen, maxLen)
-        if "глагол" in buffer:
-            result[0] += PrintWordType("v", currentLen, maxLen)
-        if "прилагательное" in buffer:
-            result[0] += PrintWordType("adj", currentLen, maxLen)
-        if "наречие" in buffer:
-            result[0] += PrintWordType("adv", currentLen, maxLen)
-
-    result[0] = result[0] + ")"
-
-    # Translation
-    translationDiv = soup.find("div", { "id" : "content_in_russian" })
-    translationSource = soup.find("div", class_ = "t_inline_en")
-    try:
-        result[1] = translationSource.text
-    except:
-        PrintWarning(f"Translation not found, word [{word}]")
-        return False
-
-    return result
-
-def GetWords(url):
-    # Try to get HTML source
-    try:
-        request = requests.get(url)
-    except:
-        PrintError("Requests module error!")
-        return False
-
-    # Try to using SOUP
-    try:
-        soup = BeautifulSoup(request.text, "html.parser")
-    except:
-        PrintError("BeautifulSoup module error!")
-        return False
-
-    # Find all "word" class
-    words = soup.find_all("a", class_ = "word")
-
-    # Prepare result
-    result = []
-    for i in words:
-        result.append(i.text[1:])
-    return result
-
-# Entry Point
 if __name__ == "__main__":
-    main()
+    EntryPoint()
